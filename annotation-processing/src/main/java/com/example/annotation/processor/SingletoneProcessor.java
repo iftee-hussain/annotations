@@ -3,6 +3,8 @@ package com.example.annotation.processor;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Set;
 import javax.annotation.processing.AbstractProcessor;
 import javax.annotation.processing.Processor;
@@ -13,6 +15,7 @@ import javax.lang.model.SourceVersion;
 import javax.lang.model.element.Element;
 import javax.lang.model.element.TypeElement;
 import javax.lang.model.element.VariableElement;
+import javax.tools.Diagnostic;
 import javax.tools.JavaFileObject;
 
 import com.google.auto.service.AutoService;
@@ -20,21 +23,23 @@ import com.google.auto.service.AutoService;
 @SupportedAnnotationTypes("com.example.annotation.processor.Singletone")
 @SupportedSourceVersion(SourceVersion.RELEASE_8)
 @AutoService(Processor.class)
-public class SingletoneProcessor extends AbstractProcessor {
+public class SingletoneProcessor extends AbstractProcessor{
+
+	Map<String, String> mapOfClasses = null;
 
 	@Override
 	public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment roundEnv) {
+
 		//set of class elements with singletone annotation
 		Set<? extends Element> annotatedElements = roundEnv.getElementsAnnotatedWith(Singletone.class);
+		Set<? extends Element> annotatedPElements = roundEnv.getElementsAnnotatedWith(Prototype.class);
+		mapOfClasses = createClassTypeMap(annotatedElements, annotatedPElements);
 		//set of field elements with wired annotation
 		Set<? extends Element> annotatedWiredElements = roundEnv.getElementsAnnotatedWith(Wired.class);
-		//set of field elements with prototype annotation
-		Set<? extends Element> annotatedProtoypeElements = roundEnv.getElementsAnnotatedWith(Prototype.class);
-
 		if (annotatedElements.size() > 0) {
 			String className = ""; // full class name with package
 			String simpleClassName = ""; //classname
-			String wiredAndPrototype = ""; // modified sorce code when wired and prototype annotations are applied
+			String wired = ""; // modified sorce code when wired and prototype annotations are applied
 			//looping through classes with singletone annotation
 			for (Element elementObj : annotatedElements) {
 				String packageName = elementObj.getEnclosingElement().toString();
@@ -42,7 +47,7 @@ public class SingletoneProcessor extends AbstractProcessor {
 				className = packageName + "." + elementObj.getSimpleName();
 				System.out.println("Annotation Processor Bulding : " + className);
 				ArrayList<Element> wiredElementList = new ArrayList<>();
-				ArrayList<Element> prototypeElementList = new ArrayList<>();
+				boolean write = true;
 				if (annotatedWiredElements.size() > 0) {
 					for (Element element : annotatedWiredElements) {
 						//check if this is wired
@@ -50,7 +55,15 @@ public class SingletoneProcessor extends AbstractProcessor {
 						if (wiredAnnotation != null) {
 							// check annotated object belongs to the same class
 							if (element.getEnclosingElement().getSimpleName().toString().equals(simpleClassName)) {
-								wiredElementList.add(element);
+								VariableElement v = (VariableElement) element;
+								String elementName = v.asType().toString();
+								if(mapOfClasses.get(elementName) == null ){
+									processingEnv.getMessager().printMessage(Diagnostic.Kind.ERROR, "@Wired must be applied to a singletone or prototype class");
+									write = false ;
+									break;
+								}
+								else
+									wiredElementList.add(element);
 							}
 
 						}
@@ -58,32 +71,20 @@ public class SingletoneProcessor extends AbstractProcessor {
 
 				}
 
-				if (annotatedProtoypeElements.size() > 0) {
-					for (Element element : annotatedProtoypeElements) {
-						//check if this is prototype
-						Prototype prototypeAnnotation = element.getAnnotation(Prototype.class);
-						if (prototypeAnnotation != null) {
-							// check annotated object belongs to the same class
-							if (element.getEnclosingElement().getSimpleName().toString().equals(simpleClassName)) {
-								prototypeElementList.add(element);
-							}
-
-						}
-					}
-
-				}
 
 				System.out.println("*****************************************************************");
+				System.out.println("*****************************************************************");
 				// modify source code for wired and prototype
-				wiredAndPrototype += wiredAndPrototypeProcessor(simpleClassName, wiredElementList,
-						prototypeElementList);
+				if(wiredElementList.size()>0 && write)
+					wired = wiredProcessor(simpleClassName, wiredElementList);
 
 				try {
 					// modify source code for singletone and write to file
-					writeBuilderFile(className, wiredAndPrototype);
+					if(write)
+						writeBuilderFile(className, wired);
+
 					wiredElementList.clear();
-					prototypeElementList.clear();
-					wiredAndPrototype = "";
+					wired = "";
 				} catch (IOException e) {
 					e.printStackTrace();
 					return true;
@@ -96,15 +97,7 @@ public class SingletoneProcessor extends AbstractProcessor {
 		return false;
 	}
 
-	/**
-	 * This method creates source code if wired and prototype annotations are applied
-	 * @param className
-	 * @param wiredElementList
-	 * @param prototypeElementList
-	 * @return
-	 */
-	private synchronized String wiredAndPrototypeProcessor(String className, ArrayList<Element> wiredElementList,
-														   ArrayList<Element> prototypeElementList) {
+	private String wiredProcessor(String className, ArrayList<Element> wiredElementList) {
 		StringBuilder sb = new StringBuilder();
 		String constructorParameters = "";
 		String constructorBody = "";
@@ -121,25 +114,15 @@ public class SingletoneProcessor extends AbstractProcessor {
 			constructorBody += "this." + variableName + " = " + variableName + ";\n\t\t";
 			constructorParameters += parameterName;
 			constructorParameters += ", ";
-			singleConstructorBody += simpleClassName + ".getInstance(),";
+			if(mapOfClasses.get(elementName).equals("singletone"))
+				singleConstructorBody += simpleClassName + ".getInstance(),";
+			else if(mapOfClasses.get(elementName).equals("prototype"))
+				singleConstructorBody += "new "+simpleClassName + "(),";
+
 
 		}
 
-		for (Element element : prototypeElementList) {
-			VariableElement v = (VariableElement) element;
-			String elementName = v.asType().toString();
-			int lastDot = elementName.lastIndexOf('.');
-			String simpleClassName = elementName.substring(lastDot + 1);
-			String variableName = v.getSimpleName().toString();
-			String parameterName = simpleClassName + " " + variableName;
-			sb.append("\tprivate  " + parameterName + ";");
-			sb.append("\n");
-			constructorBody += "this." + variableName + " = " + variableName + ";\n\t\t";
-			constructorParameters += parameterName;
-			constructorParameters += ", ";
-			singleConstructorBody += "new " + simpleClassName + "(),";
 
-		}
 		constructorParameters = constructorParameters.substring(0, constructorParameters.length() - 2);
 		singleConstructorBody = singleConstructorBody.substring(0, singleConstructorBody.length() - 1);
 		sb.append("\n\tprivate " + className + "(){");
@@ -155,14 +138,21 @@ public class SingletoneProcessor extends AbstractProcessor {
 		}
 
 		return sb.toString();
-
 	}
-	/**
-	 * This method creates source code for singletone annotaion and write to file
-	 * @param className
-	 * @param wired
-	 * @throws IOException
-	 */
+
+	private Map<String, String> createClassTypeMap(Set<? extends Element> annotatedElements,
+												   Set<? extends Element> annotatedPElements) {
+		Map<String, String> map = new HashMap<>();
+		for (Element element : annotatedElements) {
+			map.put(element.asType().toString(), "singletone");
+		}
+
+		for (Element element : annotatedPElements) {
+			map.put(element.asType().toString(), "prototype");
+		}
+		return map;
+	}
+
 	private void writeBuilderFile(String className, String wired) throws IOException {
 
 		String packageName = null;
@@ -216,5 +206,7 @@ public class SingletoneProcessor extends AbstractProcessor {
 
 		}
 	}
+
+
 
 }
